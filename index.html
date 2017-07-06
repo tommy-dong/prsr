@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script src="utils.js"></script>
+<script>
+  
+const importObject = (function() {
+  const memory = new WebAssembly.Memory({initial: 256, maximum: 256});
+  const env = {
+    'abortStackOverflow': () => { throw new Error('abortStackOverflow'); },
+    'table': new WebAssembly.Table({initial: 0, maximum: 0, element: 'anyfunc'}),
+    'tableBase': 0,
+    'memory': memory,
+    'memoryBase': 1024,
+    'STACKTOP': 0,
+    'STACK_MAX': memory.buffer.byteLength,
+    'DYNAMICTOP_PTR': 0,
+  };
+  return {env};
+}());
+
+const ready = createWebAssembly('runner.wasm', importObject)
+    .catch(err => console.warn('err loading wasm', err));
+const exports = ready.then(wa => wa.instance.exports);
+
+const TOKENS = {
+  EOF: 0,
+  SEMICOLON: 1,
+
+  NEWLINE: 2,
+  COMMA: 3,
+  SPREAD: 4,
+  DOT: 5,
+  OP: 6,
+  ARROW: 7,
+  ELISON: 8,
+  COLON: 9,
+  TERNARY: 10,
+  BRACE: 11,
+  ARRAY: 12,
+  PAREN: 13,
+
+  COMMENT: 14,
+  STRING: 15,
+  REGEXP: 16,
+  NUMBER: 17,
+  SYMBOL: 18,
+  KEYWORD: 19,
+  LABEL: 20,
+};
+
+const REVERSE = (function() {
+  const m = new Map();
+  Object.keys(TOKENS).forEach((key) => {
+    m.set(TOKENS[key], key);
+  });
+  return m;
+}());
+
+window.addEventListener('load', (ev) => {
+  const append = (text, type='') => {
+    const node = document.createElement('span');
+    node.textContent = text;
+    if (type[0] !== '_') {
+      node.title = type.toLowerCase();
+    }
+    node.className = type.toLowerCase();
+    output.appendChild(document.createTextNode(' '));
+    output.appendChild(node);
+    return node;
+  };
+
+  const render = (tokens, raw) => {
+    let lineNo = undefined;
+    output.textContent = '';
+    tokens.forEach(token => {
+      if (token.lineNo !== lineNo) {
+        lineNo = token.lineNo;
+        append(token.lineNo, '_lineno');
+      }
+
+      // TODO: this works because the input is all ASCII right now
+      const s = raw.substr(token.at, token.len);
+      const node = append(s, REVERSE.get(token.type));
+
+      switch (token.type) {
+      case TOKENS.NEWLINE:
+        return;
+      case TOKENS.SEMICOLON:
+        if (!s) {
+          node.textContent = ';';
+          node.classList.add('_asi');
+        }
+        break;
+      }
+
+      node.tabIndex = 0;
+    });
+  };
+
+  ready.then((wa) => {
+    const exports = wa.instance.exports;
+    const memory = wa.importObject.env.memory;
+
+    const update = () => {
+      const raw = input.value;
+      const pointer = copyToMemory(memory, raw);
+      exports._prsr_setup(pointer);
+
+      const tokens = [];
+      const start = performance.now();
+      for (;;) {
+        const next = exports._prsr_run();
+        if (next !== 0) {
+          console.warn('got err at', next);
+          break;
+        }
+        const token = {
+          type: exports._prsr_get_type(),
+          at: exports._prsr_get_at(),
+          len: exports._prsr_get_len(),
+          lineNo: exports._prsr_get_line_no(),
+        };
+        if (token.type === 0) {
+          break;  // don't include EOF
+        }
+        tokens.push(token);
+      }
+      const took = performance.now() - start;
+      stats.textContent = took.toLocaleString({minimumSignificantDigits: 8}) + 'ms';
+
+      render(tokens, raw);
+    };
+
+    let rAF;
+    const dedup = () => {
+      window.cancelAnimationFrame(rAF);
+      rAF = window.requestAnimationFrame(() => {
+        let v = null;
+        if (input.value.length <= 4096) {
+          // just give up if it's too large
+          v = window.encodeURIComponent(input.value);
+        }
+        if (v) {
+          window.history.replaceState(null, null, '#' + v);
+        } else {
+          window.history.replaceState(null, null, window.location.pathname);
+        }
+        update();
+      });
+    };
+    input.oninput = dedup;
+    dedup();
+  });
+});
+
+document.addEventListener('dragover', (ev) => {
+  ev.preventDefault();
+});
+document.addEventListener('drop', (ev) => {
+  ev.preventDefault();
+  const file = ev.dataTransfer.files[0];
+
+  if (!file) { return; }
+
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    input.value = ev.target.result;
+    input.dispatchEvent(new CustomEvent('input'));
+  };
+  reader.readAsText(file);
+});
+
+</script>
+<style>
+  textarea {
+    font-family: monospace;
+    resize: none;
+  }
+  pre {
+    cursor: pointer;
+  }
+  pre span._lineno {
+    background: red;
+    color: white;
+  }
+  pre span._asi {
+    background: green;
+    color: white;
+  }
+  pre span.comment {
+    color: green;
+  }
+  pre span.keyword {
+    color: purple;
+    font-weight: bold;
+  }
+  pre span.number,
+  pre span.string,
+  pre span.regexp {
+    color: red;
+  }
+  pre span.label {
+    color: brown;
+  }
+  pre span.symbol {
+    color: blue;
+  }
+</style>
+</head>
+<body>
+
+<textarea id="input" rows="20" cols="100"></textarea>
+<script>
+window.addEventListener('hashchange', (ev) => {
+  input.value = window.decodeURIComponent(window.location.hash.substr(1));
+});
+window.dispatchEvent(new CustomEvent('hashchange'));
+</script>
+
+<div id="stats">
+</div>
+
+<pre id="output"></pre>
+
+</body>
+</html>
