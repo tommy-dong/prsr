@@ -1,44 +1,59 @@
 <!DOCTYPE html>
 <html>
 <head>
-<script src="utils.js"></script>
-<script>
-  
+<script type="module">
+
+import * as utils from './utils.js';
+
+let globalCallback;
+
 const importObject = (function() {
-  const memory = new WebAssembly.Memory({initial: 256, maximum: 256});
   const env = {
-    'abortStackOverflow': () => { throw new Error('abortStackOverflow'); },
-    'table': new WebAssembly.Table({initial: 0, maximum: 0, element: 'anyfunc'}),
-    'tableBase': 0,
-    'memory': memory,
-    'memoryBase': 1024,
-    'STACKTOP': 0,
-    'STACK_MAX': memory.buffer.byteLength,
-    'DYNAMICTOP_PTR': 0,
+    memory: new WebAssembly.Memory({initial: 256, maximum: 256}),
+    table: new WebAssembly.Table({initial: 2, maximum: 2, element: 'anyfunc'}),
+    __table_base: 0,
+
+    abort(arg) {
+      throw new Error(`abort: ${arg}`);
+    },
+
+    // callbacks here
+    _token_callback(p, len, line_no, type, mark) {
+      globalCallback(p, len, line_no, type, mark);
+    },
   };
+
   return {env};
 }());
 
-const ready = createWebAssembly('runner.wasm', importObject)
-    .catch(err => console.warn('err loading wasm', err));
-const exports = ready.then(wa => wa.instance.exports);
+const ready = utils.createWebAssembly('runner.wasm', importObject)
+    .catch((err) => console.warn('err loading wasm', err));
+const exports = ready.then((wa) => wa.instance.exports);
+
+function reverseDict(dict) {
+  const m = new Map();
+  Object.keys(dict).forEach((key) => {
+    m.set(dict[key], key.toLowerCase());
+  });
+  return (number) => m.get(number) || null;
+};
 
 const TOKENS = {
   EOF: 0,
   SEMICOLON: 1,
 
-  NEWLINE: 2,
-  COMMA: 3,
-  SPREAD: 4,
-  DOT: 5,
-  OP: 6,
-  ARROW: 7,
-  ELISON: 8,
-  COLON: 9,
-  TERNARY: 10,
-  BRACE: 11,
-  ARRAY: 12,
-  PAREN: 13,
+  COMMA: 2,
+  SPREAD: 3,
+  DOT: 4,
+  OP: 5,
+  ARROW: 6,
+  COLON: 7,
+  BRACE: 8,
+  ARRAY: 9,
+  PAREN: 10,
+  T_BRACE: 11,
+  TERNARY: 12,
+  CLOSE: 13,
 
   COMMENT: 14,
   STRING: 15,
@@ -47,45 +62,60 @@ const TOKENS = {
   SYMBOL: 18,
   KEYWORD: 19,
   LABEL: 20,
-};
 
-const REVERSE = (function() {
-  const m = new Map();
-  Object.keys(TOKENS).forEach((key) => {
-    m.set(TOKENS[key], key);
-  });
-  return m;
-}());
+  LIT: 29,
+  SLASH: 30,
+  INTERNAL: 31,
+};
+const TOKEN_LOOKUP = reverseDict(TOKENS);
+
+const MARKS = {
+  IMPORT: 1,
+};
+const MARK_LOOKUP = reverseDict(MARKS);
+
 
 window.addEventListener('load', (ev) => {
   const append = (text, type='') => {
     const node = document.createElement('span');
-    node.textContent = text;
+    node.textContent = String(text).replace(/\n*$/, '');
     if (type[0] !== '_') {
       node.title = type.toLowerCase();
     }
     node.className = type.toLowerCase();
+    node.title = type;
     output.appendChild(document.createTextNode(' '));
     output.appendChild(node);
     return node;
   };
+  const appendLine = () => {
+    if (output.childNodes.length && output.lastChild.textContent != '\n') {
+      output.appendChild(document.createTextNode('\n'));
+    }
+  };
 
-  const render = (tokens, raw) => {
+  const render = (tokens, view) => {
     let lineNo = undefined;
     output.textContent = '';
-    tokens.forEach(token => {
+    tokens.forEach((token) => {
       if (token.lineNo !== lineNo) {
         lineNo = token.lineNo;
+        appendLine();
         append(token.lineNo, '_lineno');
       }
 
-      // TODO: this works because the input is all ASCII right now
-      const s = raw.substr(token.at, token.len);
-      const node = append(s, REVERSE.get(token.type));
+      const s = view.read(token.at, token.len);
+      const node = append(s, TOKEN_LOOKUP(token.type));
+
+      if (token.invalid) {
+        node.classList.add('__invalid');
+      }
+      const mark = MARK_LOOKUP(token.mark);
+      if (mark) {
+        node.classList.add('_' + mark);
+      }
 
       switch (token.type) {
-      case TOKENS.NEWLINE:
-        return;
       case TOKENS.SEMICOLON:
         if (!s) {
           node.textContent = ';';
@@ -104,32 +134,46 @@ window.addEventListener('load', (ev) => {
 
     const update = () => {
       const raw = input.value;
-      const pointer = copyToMemory(memory, raw);
-      exports._prsr_setup(pointer);
+      const view = new utils.CodeView(memory, raw);
+      exports._prsr_setup(view.at, module.checked ? 1 : 0);
 
+      const futureLitResolve = new Map();
       const tokens = [];
       const start = performance.now();
-      for (;;) {
-        const next = exports._prsr_run();
-        if (next !== 0) {
-          console.warn('got err at', next);
+
+      let err = 0;
+      try {
+        globalCallback = (at, len, lineNo, type, mark) => {
+          const token = {at, len, lineNo, type, mark, invalid: false};
+
+          // if we have find LIT, it's probably an ambiguous "async () =>", so save it for later
+          if (token.type == TOKENS.LIT) {
+            futureLitResolve.set(token.at, token);
+          }
+
+          tokens.push(token);
+        };
+        for (;;) {
+          err = exports._prsr_run(0);
+          // TODO: call many times if valid
           break;
         }
-        const token = {
-          type: exports._prsr_get_type(),
-          at: exports._prsr_get_at(),
-          len: exports._prsr_get_len(),
-          lineNo: exports._prsr_get_line_no(),
-        };
-        if (token.type === 0) {
-          break;  // don't include EOF
-        }
-        tokens.push(token);
+      } catch (thrown) {
+        console.error(thrown);
+        err = thrown;
       }
-      const took = performance.now() - start;
-      stats.textContent = took.toLocaleString({minimumSignificantDigits: 8}) + 'ms';
 
-      render(tokens, raw);
+      const took = performance.now() - start;
+      stats.textContent = `${took.toLocaleString({minimumSignificantDigits: 8})}ms`;
+
+      const renderStart = performance.now();
+      render(tokens, view);
+      const renderTook = performance.now() - start;
+      stats.textContent += `\n${renderTook.toLocaleString({minimumSignificantDigits: 8})}ms render`;
+
+      if (err) {
+        stats.textContent += `\nerr: ${err}`;
+      }
     };
 
     let rAF;
@@ -150,6 +194,7 @@ window.addEventListener('load', (ev) => {
       });
     };
     input.oninput = dedup;
+    module.onchange = dedup;
     dedup();
   });
 });
@@ -181,7 +226,8 @@ document.addEventListener('drop', (ev) => {
     cursor: pointer;
   }
   pre span._lineno {
-    background: red;
+    background: purple;
+    font-style: italic;
     color: white;
   }
   pre span._asi {
@@ -200,11 +246,27 @@ document.addEventListener('drop', (ev) => {
   pre span.regexp {
     color: red;
   }
+  pre span.op {
+    color: purple;
+  }
   pre span.label {
     color: brown;
   }
   pre span.symbol {
     color: blue;
+  }
+  pre span.lit {
+    background: red;
+    color: white;
+  }
+  pre span.__invalid {
+    text-decoration: underline;
+  }
+  pre span._import {
+    font-style: italic;
+  }
+  #stats {
+    white-space: pre;
   }
 </style>
 </head>
@@ -214,6 +276,12 @@ document.addEventListener('drop', (ev) => {
   <a href="https://github.com/samthor/prsr">GitHub</a>
 </div>
 
+<div>
+  <label>
+    <input type="checkbox" id="module" />
+    Module
+  </label>
+</div>
 <textarea id="input" rows="20" cols="100"></textarea>
 <script>
 window.addEventListener('hashchange', (ev) => {
