@@ -45,27 +45,29 @@ function reverseDict(dict) {
 
 const TOKENS = {
   EOF: 0,
-  SEMICOLON: 1,
 
-  COMMA: 2,
-  OP: 3,
-  ARROW: 4,
-  COLON: 5,
-  BRACE: 6,
-  ARRAY: 7,
-  PAREN: 8,
-  T_BRACE: 9,
-  TERNARY: 10,
-  CLOSE: 11,
+  EXEC: 1,
+  SEMICOLON: 2,
+  COMMA: 3,
+  OP: 4,
+  ARROW: 5,
+  COLON: 6,
+  DICT: 7,
+  ARRAY: 8,
+  PAREN: 9,
+  T_BRACE: 10,
+  TERNARY: 11,
+  CLOSE: 12,
 
-  COMMENT: 12,
-  STRING: 13,
-  REGEXP: 14,
-  NUMBER: 15,
-  SYMBOL: 16,
-  KEYWORD: 17,
-  LABEL: 18,
+  COMMENT: 13,
+  STRING: 14,
+  REGEXP: 15,
+  NUMBER: 16,
+  SYMBOL: 17,
+  KEYWORD: 18,
+  LABEL: 19,
 
+  BRACE: 29,
   LIT: 30,
   SLASH: 31,
 };
@@ -130,13 +132,19 @@ window.addEventListener('load', (ev) => {
         node.classList.add('_' + mark);
       }
 
-      switch (token.type) {
-      case TOKENS.SEMICOLON:
-        if (!s) {
-          node.textContent = ';';
-          node.classList.add('_asi');
+      if (!s) {
+        node.classList.add('_virt');
+        switch (token.type) {
+          case TOKENS.SEMICOLON:
+            node.textContent = ';'
+            break;
+          case TOKENS.EXEC:
+            node.textContent = '{';
+            break;
+          case TOKENS.CLOSE:
+            node.textContent = '}';
+            break;
         }
-        break;
       }
 
       node.tabIndex = 0;
@@ -283,7 +291,7 @@ document.addEventListener('drop', (ev) => {
     min-width: var(--line-no-width, 1ch);
     text-align: right;
   }
-  pre span._asi {
+  pre span._virt {
     background: green;
     color: white;
   }
