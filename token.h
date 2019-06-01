@@ -29,6 +29,7 @@ typedef struct {
 
   // depth/flag used to record ${} state (resume literal once brace done)
   uint8_t flag : 2;
+  int8_t attach_has_value : 2;  // [-2,+1]
   uint16_t depth : __STACK_SIZE_BITS;
   uint8_t stack[__STACK_SIZE];
 } tokendef;

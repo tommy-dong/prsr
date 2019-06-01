@@ -553,7 +553,7 @@ static int simple_consume_expr(simpledef *sd) {
         if (sd->tok.line_no == sd->curr->prev.line_no) {
           // ... don't record this, right-side (e.g. "a++")
           debugf("not recording right-side +/--\n");
-          return skip_walk(sd, 0);
+          return skip_walk(sd, -1);
         }
 
         // otherwise, it's on a newline (invalid in pure statement, generate ASI otherwise)
@@ -563,7 +563,7 @@ static int simple_consume_expr(simpledef *sd) {
         }
       }
       debugf("got left-side ++/--\n");
-      return record_walk(sd, 0);
+      return record_walk(sd, -1);
 
     case TOKEN_COLON:
       if ((sd->curr - 1)->stype == SSTACK__BLOCK) {

@@ -124,6 +124,65 @@ static int consume_string(char *p, int *line_no, int *litflag) {
   return len;
 }
 
+static inline int infer_has_value(token *prev) {
+  uint32_t hash = prev->hash;
+  switch (hash) {
+    case MISC_RARRAY:
+      // end of array [], always op
+      return 1;
+
+    case MISC_COLON:
+      // a) "? ... :", no value, always regexp
+      // b) post-label, always regexp
+      return 0;
+  }
+
+  switch (prev->type) {
+    case TOKEN_OP:
+      if (prev->hash == MISC_INCDEC) {
+        break;  // weird attachment rules
+      }
+      // fall-through
+
+    case TOKEN_EOF:
+    case TOKEN_EXEC:
+    case TOKEN_SEMICOLON:
+    case TOKEN_ARROW:
+    case TOKEN_COLON:    // matched above
+    case TOKEN_DICT:     // not generated (and invalid)
+    case TOKEN_ARRAY:
+    case TOKEN_PAREN:
+    case TOKEN_T_BRACE:
+    case TOKEN_TERNARY:
+    case TOKEN_BRACE:
+      return 0;
+
+    case TOKEN_LIT:
+      if (hash & (_MASK_REL_OP | _MASK_UNARY_OP)) {
+        // "in", "delete" etc always take arg on right
+        return 0;
+      } else if (hash) {
+        break;  // who knows
+      }
+      // fall-through
+
+    case TOKEN_REGEXP:
+    case TOKEN_NUMBER:
+    case TOKEN_STRING:
+    case TOKEN_SYMBOL:   // not generated
+      return 1;
+
+#ifdef DEBUG
+    case TOKEN_CLOSE:
+    case TOKEN_KEYWORD:  // not generated
+    case TOKEN_LABEL:    // not generated (and invalid)
+      break;  // ambiguous
+#endif
+  }
+
+  return -1;
+}
+
 static eat_out eat_token(char *p, token *prev) {
 #define _ret(_len, _type) ((eat_out) {_len, _type, 0});
 #define _reth(_len, _type, _hash) ((eat_out) {_len, _type, _hash});
@@ -134,64 +193,17 @@ static eat_out eat_token(char *p, token *prev) {
     case 0:
       return _ret(0, TOKEN_EOF);
 
-    case '/': {
-      uint32_t hash = prev->hash;
-      switch (hash) {
-        case MISC_RARRAY:
-          // end of array [], always op
-          return _ret(consume_slash_op(p), TOKEN_OP);
-
-        case MISC_COLON:
-          // a) "? ... :", no value, always regexp
-          // b) post-label, always regexp
-          return _ret(consume_slash_regexp(p), TOKEN_REGEXP);
-      }
-
-      switch (prev->type) {
-        case TOKEN_OP:
-          if (prev->hash == MISC_INCDEC) {
-            break;  // weird attachment rules
-          }
-          // fall-through
-
-        case TOKEN_EOF:
-        case TOKEN_EXEC:
-        case TOKEN_SEMICOLON:
-        case TOKEN_ARROW:
-        case TOKEN_COLON:    // matched above
-        case TOKEN_DICT:     // not generated (and invalid)
-        case TOKEN_ARRAY:
-        case TOKEN_PAREN:
-        case TOKEN_T_BRACE:
-        case TOKEN_TERNARY:
+    case '/':
+      switch (infer_has_value(prev)) {
+        case 0:
           return _ret(consume_slash_regexp(p), TOKEN_REGEXP);
 
-        case TOKEN_LIT:
-          if (hash & (_MASK_REL_OP | _MASK_UNARY_OP)) {
-            // "in", "delete" etc always take arg on right
-            return _ret(consume_slash_regexp(p), TOKEN_REGEXP);
-          } else if (hash) {
-            break;  // who knows
-          }
-          // fall-through
-
-        case TOKEN_REGEXP:
-        case TOKEN_NUMBER:
-        case TOKEN_STRING:
-        case TOKEN_SYMBOL:   // not generated
+        case 1:
           return _ret(consume_slash_op(p), TOKEN_OP);
-
-#ifdef DEBUG
-        case TOKEN_CLOSE:
-        case TOKEN_KEYWORD:  // not generated
-        case TOKEN_LABEL:    // not generated (and invalid)
-          break;  // ambiguous
-#endif
       }
 
       // unkown, return ambiguous
-      return _ret(1, TOKEN_SLASH);  // return ambig, handled elsewhere
-    }
+      return _ret(1, TOKEN_SLASH);
 
     case ';':
       return _ret(1, TOKEN_SEMICOLON);
@@ -455,7 +467,7 @@ static char *consume_space(char *p, int *line_no) {
 #undef _check
 }
 
-static void eat_next(tokendef *d) {
+static void eat_next(tokendef *d, int had_value) {
   // consume from next, repeat(space, comment [first into pending]) and next token
   char *from = d->next.p + d->next.len;
 
@@ -492,6 +504,14 @@ static void eat_next(tokendef *d) {
 
   // match real token
   eat_out eat = eat_token(p, &(d->next));
+  if (eat.hash == MISC_INCDEC) {
+    // retain previous had_value (including -1)
+    if (d->line_no == d->next.line_no) {
+      d->attach_has_value = infer_has_value(&(d->next));
+    } else {
+      d->attach_has_value = 0;
+    }
+  }
   d->next.type = eat.type;
   d->next.hash = eat.hash;
   d->next.line_no = d->line_no;
@@ -546,6 +566,16 @@ int prsr_next_token(tokendef *d, token *out, int has_value) {
   }
 
   memcpy(out, &d->next, sizeof(token));
+  if (out->hash == MISC_INCDEC) {
+    if (d->attach_has_value < 0) {
+      if (has_value < 0) {
+        return ERROR__VALUE;
+      }
+    } else {
+      has_value = d->attach_has_value;
+    }
+    printf("got incdec with has_value: %d\n", has_value);
+  }
 
   // actually enact token
   switch (out->type) {
@@ -569,7 +599,7 @@ int prsr_next_token(tokendef *d, token *out, int has_value) {
     case TOKEN_BRACE:
     case TOKEN_T_BRACE:
       if (d->depth == __STACK_SIZE - 1) {
-        eat_next(d);  // consume invalid open but return error
+        eat_next(d, has_value);  // consume invalid open but return error
         return ERROR__STACK;
       }
       d->stack[d->depth++] = out->type;
@@ -577,7 +607,7 @@ int prsr_next_token(tokendef *d, token *out, int has_value) {
 
     case TOKEN_CLOSE:
       if (!d->depth) {
-        eat_next(d);  // consume invalid close but return error
+        eat_next(d, has_value);  // consume invalid close but return error
         return ERROR__STACK;
       }
       uint8_t type = d->stack[--d->depth];
@@ -587,7 +617,7 @@ int prsr_next_token(tokendef *d, token *out, int has_value) {
       break;
   }
 
-  eat_next(d);
+  eat_next(d, has_value);
   return 0;
 }
 
@@ -609,6 +639,6 @@ tokendef prsr_init_token(char *p) {
   d.pending.type = TOKEN_COMMENT;
   d.next.p = p;  // place next cursor
 
-  eat_next(&d);
+  eat_next(&d, 0);
   return d;
 }
