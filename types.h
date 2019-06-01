@@ -61,6 +61,9 @@ typedef struct {
 #define TOKEN_KEYWORD   18
 #define TOKEN_LABEL     19  // to the left of a ':', e.g. 'foo:'
 
+#define TOKEN_START     26
+#define TOKEN_ATTACH    27
+
 // internal/ambiguous tokens
 #define TOKEN_TOP       28  // never reported, top of function or program
 #define TOKEN_BRACE     29  // ambig brace

@@ -345,28 +345,6 @@ static int match_decl(simpledef *sd) {
 }
 
 
-// can the current token create a trailing control group from prev
-static inline int may_trail_control(uint32_t prev, uint32_t curr) {
-  if (curr & _MASK_CONTROL) {
-    switch (prev) {
-      case LIT_IF:
-        return curr == LIT_ELSE;
-
-      case LIT_DO:
-        debugf("may_trail_control called with LIT_DO\n");
-        return curr == LIT_WHILE;
-
-      case LIT_TRY:
-        return curr == LIT_CATCH || curr == LIT_FINALLY;
-
-      case LIT_CATCH:
-        return curr == LIT_FINALLY;
-    }
-  }
-  return 0;
-}
-
-
 static int simple_start_arrowfunc(simpledef *sd, int async) {
 #ifdef DEBUG
   if (sd->tok.type != TOKEN_ARROW) {
@@ -677,42 +655,6 @@ static int simple_consume_expr(simpledef *sd) {
 }
 
 
-// must be called in SSTACK__BLOCK state
-static int maybe_close_control(simpledef *sd, token *t) {
-  sstack *c = sd->curr;
-#ifdef DEBUG
-  if (c->stype != SSTACK__BLOCK) {
-    debugf("got maybe_close_control outside SSTACK__BLOCK\n");
-    return ERROR__ASSERT;
-  }
-#endif
-
-  if (c == sd->stack) {
-    return 0;  // can't close top or even check above
-  } else if (t && t->type == TOKEN_CLOSE) {
-    // allowed, this might be e.g. "if { if 1 }"
-  } else if (!c->prev.type || c->prev.type == TOKEN_COLON) {
-    // ... special-cases TOKEN_COLON to allow labels
-    return 0;
-  }
-
-  if ((c - 1)->prev.p) {
-    // if parent is non-NULL, then wait for the closing }
-    debugf("but doing nothing\n");
-    return 0;
-  }
-  // ... otherwise, we have a virtual TOKEN_EXEC!
-
-  --sd->curr;
-#ifdef DEBUG
-  if (sd->curr->stype != SSTACK__CONTROL || sd->curr->prev.type != TOKEN_EXEC) {
-    return ERROR__ASSERT;
-  }
-#endif
-  return 1;
-}
-
-
 static int simple_consume(simpledef *sd) {
   switch (sd->curr->stype) {
     // async arrow function state
@@ -1017,82 +959,10 @@ abandon_module:
 
     // control group state
     case SSTACK__CONTROL:
-      // if we had an exec, then abandon: all done
-      if (sd->curr->prev.type == TOKEN_EXEC) {
-        if (!sd->curr->prev.p) {
-restart_control:
-          // ... was virtual exec, emit close (real token didn't close us)
-          yield_virt_skip(sd, TOKEN_CLOSE);
-        }
-
-        if (sd->curr->start == LIT_DO) {
-          // ... search for trailer "while ("
-          if (sd->next->type == TOKEN_PAREN && sd->tok.hash == LIT_WHILE) {
-            sd->tok.type = TOKEN_KEYWORD;
-            record_walk(sd, -1);  // consume while
-            record_walk(sd, -1);  // consume paren
-            stack_inc(sd, SSTACK__EXPR);
-            sd->curr->start = TOKEN_PAREN;
-            return 0;
-          }
-          debugf("invalid do-while, abandoning\n");
-        } else if (may_trail_control(sd->curr->start, sd->tok.hash)) {
-          debugf("control closed but found trailer: %.*s\n", sd->tok.len, sd->tok.p);
-          --sd->curr;  // leave SSTACK__CONTROL but _not_ the parent SSTACK__BLOCK
-          return 0;
-        }
-
-check_single_block:
-        --sd->curr;  // leave SSTACK__CONTROL
-#ifdef DEBUG
-        if (sd->curr->stype != SSTACK__BLOCK) {
-          debugf("control found NOT in block\n");
-          return ERROR__ASSERT;
-        }
-#endif
-
-        // repeat if within a single block (NULL pointer)
-        if (sd->curr != sd->stack && !(sd->curr - 1)->prev.p) {
-          debugf("closed control inside ANOTHER control\n");
-          --sd->curr;
-          goto restart_control;
-        }
-        return 0;
-      }
-
-      // look for close of do-while ()'s
-      if (sd->curr->start == LIT_DO && sd->curr->prev.type == TOKEN_PAREN) {
-        debugf("matching do-while paren end\n");
-        // this is end of valid group, emit ASI if there's not one
-        // occurs regardless of newline, e.g. "do;while(0)foo" is valid, ASI after close paren
-        if (sd->tok.type == TOKEN_SEMICOLON) {
-          skip_walk(sd, -1);
-        } else {
-          yield_virt(sd, TOKEN_SEMICOLON);
-        }
-        // FIXME: gross, but we want to check if this semi closes anything else
-        goto check_single_block;
-      }
-
-#ifdef DEBUG
-      if (sd->curr->prev.type && sd->curr->prev.type != TOKEN_PAREN && !(sd->curr->prev.hash & _MASK_CONTROL)) {
-        debugf("control exec must only start after blank, paren or control\n");
-        return ERROR__ASSERT;
-      }
-#endif
-
-      // otherwise, start an exec block!
-      if (sd->tok.type == TOKEN_BRACE) {
-        // ... found e.g., "if {}"
-        sd->tok.type = TOKEN_EXEC;
-        record_walk(sd, -1);
-        stack_inc(sd, SSTACK__BLOCK);
-      } else {
-        // ... found e.g. "if something_else", push virtual exec block
-        yield_virt(sd, TOKEN_EXEC);
-        stack_inc(sd, SSTACK__BLOCK);
-      }
-      return 0;
+      --sd->curr;
+      yield_virt(sd, TOKEN_ATTACH);
+      // FIXME FIXME "do-while" case
+      break;
 
     case SSTACK__EXPR:
       return simple_consume_expr(sd);
@@ -1106,21 +976,19 @@ check_single_block:
       break;
   }
 
-  if (maybe_close_control(sd, &sd->tok)) {
-    // FIXME: we could call this in outer method
-    // yield back to SSTACK__CONTROL
-    return 0;
-  }
-
   // TODO: yield start token
   if (sd->tok.type != TOKEN_CLOSE) {
-    // yield_virt(sd, TOKEN_START);
+    if (sd->curr->prev.type != TOKEN_ATTACH) {
+      yield_virt(sd, TOKEN_START);
+    }
   }
 
   switch (sd->tok.type) {
     case TOKEN_BRACE:
       // anon block
-      debugf("unattached exec block\n");
+      if (sd->curr->prev.type != TOKEN_ATTACH) {
+        debugf("unattached exec block\n");
+      }
       sd->tok.type = TOKEN_EXEC;
       record_walk(sd, -1);
       stack_inc(sd, SSTACK__BLOCK);
@@ -1131,13 +999,10 @@ check_single_block:
         // ... top-level, invalid CLOSE
         debugf("invalid close\n");
       } else {
-       --sd->curr;  // pop out of block
- #ifdef DEBUG
-        if (sd->curr->stype == SSTACK__CONTROL && sd->curr->prev.type == TOKEN_EXEC && !sd->curr->prev.p) {
-          debugf("TOKEN_CLOSE inside SSTACK__BLOCK for single block\n");
-          return ERROR__ASSERT;
+        if (sd->curr->prev.type == TOKEN_ATTACH) {
+          debugf("got CLOSE after ATTACH\n");
         }
-#endif
+        --sd->curr;  // pop out of block
       }
 
       // "function {}" that ends in statement/group has value
@@ -1189,8 +1054,9 @@ check_single_block:
   // match label
   if (is_label(&(sd->tok), sd->curr->context) && sd->next->type == TOKEN_COLON) {
     sd->tok.type = TOKEN_LABEL;
-    skip_walk(sd, -1);    // consume label
-    record_walk(sd, -1);  // consume colon and record (to prevent bad 'use strict')
+    skip_walk(sd, -1);  // consume label
+    skip_walk(sd, -1);  // consume colon
+    yield_virt(sd, TOKEN_ATTACH);
     return 0;
   }
 
@@ -1269,9 +1135,6 @@ check_single_block:
 
   // match e.g., "if", "catch"
   if (outer_hash & _MASK_CONTROL) {
-    stack_inc(sd, SSTACK__CONTROL);
-    sd->curr->start = outer_hash;
-
     sd->tok.type = TOKEN_KEYWORD;
     record_walk(sd, 0);
 
@@ -1282,13 +1145,18 @@ check_single_block:
       skip_walk(sd, 0);
     }
 
-    // if we need a paren, consume and create expr group
-    if ((outer_hash & _MASK_CONTROL_PAREN) && sd->tok.type == TOKEN_PAREN) {
-      record_walk(sd, -1);
-      stack_inc(sd, SSTACK__EXPR);
-      sd->curr->start = TOKEN_PAREN;
+    // no paren needed or found, request attach immediately
+    if (!(outer_hash & _MASK_CONTROL_PAREN) || sd->tok.type != TOKEN_PAREN) {
+      yield_virt(sd, TOKEN_ATTACH);
+      return 0;
     }
 
+    // if we need a paren, consume and create expr group
+    stack_inc(sd, SSTACK__CONTROL);
+    sd->curr->start = outer_hash;
+    record_walk(sd, -1);  // record inside SSTACK__CONTROL
+    stack_inc(sd, SSTACK__EXPR);
+    sd->curr->start = TOKEN_PAREN;
     return 0;
   }
 
