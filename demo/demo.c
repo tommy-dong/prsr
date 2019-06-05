@@ -59,12 +59,23 @@ void render_callback(void *arg, token *out) {
   if (out->hash) {
     c = '#';  // has a hash
   } else if (!out->len) {
-    if (out->type == TOKEN_SEMICOLON) {
-      c = ';';  // this is an ASI
-    } else if (out->type == TOKEN_EXEC) {
-      c = '{';
-    } else if (out->type == TOKEN_CLOSE) {
-      c = '}';
+
+    switch (out->type) {
+      case TOKEN_START:
+        c = '>';
+        break;
+
+      case TOKEN_ATTACH:
+        c = '^';
+        break;
+
+      case TOKEN_SEMICOLON:
+        if (out->line_no) {
+          c = ';';
+        } else {
+          c = '!';  // end of statement ASI but invalid line_no
+        }
+        break;
     }
   }
   printf("%c%4d.%02d: %.*s\n", c, out->line_no, out->type, out->len, out->p);
