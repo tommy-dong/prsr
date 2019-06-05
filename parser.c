@@ -545,6 +545,7 @@ static int simple_consume_expr(simpledef *sd) {
         // ... this is a PostfixExpression that disallows LineTerminator
         if ((sd->curr - 1)->stype == SSTACK__BLOCK) {
           yield_virt(sd, TOKEN_SEMICOLON);
+          yield_virt(sd, TOKEN_START);
         }
       }
       debugf("got left-side ++/--\n");
@@ -1172,26 +1173,6 @@ block_bail:
 }
 
 
-#ifdef DEBUG
-void render_token(token *out, char *start) {
-  if (!out->type) {
-    return;
-  }
-  char c = ' ';
-  if (out->type == TOKEN_SEMICOLON && !out->len) {
-    c = ';';  // this is an ASI
-  } else if (out->hash) {
-    c = '#';  // has a hash
-  }
-  int at = 0;
-  if (out->p) {
-    at = out->p - start;
-  }
-  printf("%c%4d.%02d: %.*s [%d]\n", c, out->line_no, out->type, out->len, out->p, at);
-}
-#endif
-
-
 int prsr_simple(tokendef *td, int is_module, prsr_callback cb, void *arg) {
 #ifdef DEBUG
   char *start = td->buf;
@@ -1231,10 +1212,8 @@ int prsr_simple(tokendef *td, int is_module, prsr_callback cb, void *arg) {
 
     // allow unchanged ptr for some attempts for state machine
     if (prev == sd.tok.p) {
-      if (unchanged++ < 4) {
-        // we give it four chances to change something to let the state machine work
-        // (needed for SSTACK__CONTROL)
-        continue;
+      if (unchanged++ < 2) {
+        continue;  // allow two runs
       }
       debugf("simple_consume didn't consume: %d %.*s\n", sd.tok.type, sd.tok.len, sd.tok.p);
       ret = ERROR__INTERNAL;

@@ -69,6 +69,10 @@ void render_callback(void *arg, token *out) {
         c = '^';
         break;
 
+      case TOKEN_MORE:
+        c = '<';
+        break;
+
       case TOKEN_SEMICOLON:
         if (out->line_no) {
           c = ';';
